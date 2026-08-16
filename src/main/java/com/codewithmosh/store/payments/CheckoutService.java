@@ -1,14 +1,12 @@
 package com.codewithmosh.store.payments;
 
-import com.codewithmosh.store.entities.Order;
-import com.codewithmosh.store.entities.OrderItem;
-import com.codewithmosh.store.entities.PaymentStatus;
-import com.codewithmosh.store.exceptions.CartEmptyException;
-import com.codewithmosh.store.exceptions.CartNotFoundException;
-import com.codewithmosh.store.repositories.CartRepository;
-import com.codewithmosh.store.repositories.OrderRepository;
-import com.codewithmosh.store.services.AuthService;
-import com.codewithmosh.store.services.CartService;
+import com.codewithmosh.store.orders.Order;
+import com.codewithmosh.store.carts.CartEmptyException;
+import com.codewithmosh.store.carts.CartNotFoundException;
+import com.codewithmosh.store.carts.CartRepository;
+import com.codewithmosh.store.orders.OrderRepository;
+import com.codewithmosh.store.auth.AuthService;
+import com.codewithmosh.store.carts.CartService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -17,62 +15,46 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class CheckoutService {
     private final CartRepository cartRepository;
-    private final AuthService authService;
     private final OrderRepository orderRepository;
+    private final AuthService authService;
     private final CartService cartService;
     private final PaymentGateway paymentGateway;
-
 
     @Transactional
     public CheckoutResponse checkout(CheckoutRequest request) {
         var cart = cartRepository.getCartWithItems(request.getCartId()).orElse(null);
-        if (cart == null){
+        if (cart == null) {
             throw new CartNotFoundException();
         }
 
-        if (cart.isEmpty()){
+        if (cart.isEmpty()) {
             throw new CartEmptyException();
         }
 
-        var order = new Order();
-        order.setTotalPrice(cart.getTotalPrice());
-        order.setStatus(PaymentStatus.PENDING);
-        order.setCustomer(authService.getCurrentUser());
-
-        cart.getItems().forEach(item -> {
-            var orderItem = new OrderItem();
-            orderItem.setOrder(order);
-            orderItem.setProduct(item.getProduct());
-            orderItem.setQuantity(item.getQuantity());
-            orderItem.setTotalPrice(item.getTotalPrice());
-            orderItem.setUnitPrice(item.getProduct().getPrice());
-            order.getItems().add(orderItem);
-
-        });
+        var order = Order.fromCart(cart, authService.getCurrentUser());
 
         orderRepository.save(order);
 
-       try{
-           var session = paymentGateway.createCheckoutSession(order);
+        try {
+            var session = paymentGateway.createCheckoutSession(order);
 
-           cartService.clearCart(cart.getId());
+            cartService.clearCart(cart.getId());
 
-           return new CheckoutResponse(order.getId(), session.getCheckoutUrl());
-       }catch (PaymentException ex){
-//           System.out.println(ex.getMessage());
-           orderRepository.delete(order);
-           throw ex;
-       }
+            return new CheckoutResponse(order.getId(), session.getCheckoutUrl());
+        }
+        catch (PaymentException ex) {
+            orderRepository.delete(order);
+            throw ex;
+        }
     }
 
     public void handleWebhookEvent(WebhookRequest request) {
         paymentGateway
-                .parseWebhookRequest(request)
-                .ifPresent(paymentResult -> {
-                    var order = orderRepository.findById(paymentResult.getOrderId()).orElseThrow();
-                    order.setStatus(paymentResult.getPaymentStatus());
-                    orderRepository.save(order);
-                });
+            .parseWebhookRequest(request)
+            .ifPresent(paymentResult -> {
+                var order = orderRepository.findById(paymentResult.getOrderId()).orElseThrow();
+                order.setStatus(paymentResult.getPaymentStatus());
+                orderRepository.save(order);
+            });
     }
-
 }
